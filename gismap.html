@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Mapbox — Ghana Flight Distance</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <!-- Mapbox GL -->
+  <script src="https://api.mapbox.com/mapbox-gl-js/v2.20.0/mapbox-gl.js"></script>
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.20.0/mapbox-gl.css" rel="stylesheet" />
+  <!-- Turf for geodesic math -->
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+  <style>
+    :root{--accent:#0f62fe;--card:#ffffff;--bg:#f6f8fb;--muted:#666;}
+    body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;background:var(--bg);color:#111}
+    .container{max-width:1100px;margin:28px auto;padding:18px}
+    .panel{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start}
+    .card{background:var(--card);border-radius:10px;box-shadow:0 6px 18px rgba(15,22,39,0.06);padding:16px;flex:0 0 380px;min-width:280px}
+    .mapwrap{flex:1;min-width:300px;min-height:560px;border-radius:10px;overflow:hidden}
+    #map{width:100%;height:100%}
+    label{display:block;font-weight:600;margin-bottom:6px}
+    input[type="text"], select{width:100%;padding:10px;border:1px solid #e6e9ee;border-radius:8px;margin-bottom:12px}
+    .row{display:flex;gap:8px}
+    .btn{background:var(--accent);color:#fff;border:none;padding:10px 12px;border-radius:8px;cursor:pointer}
+    .btn:disabled{opacity:0.6;cursor:default}
+    .muted{color:var(--muted);font-size:13px}
+    .result{margin-top:10px;padding:8px;border-radius:8px;background:#f3f6ff}
+    .place-list li{margin:8px 0;list-style:none;padding:6px;border-radius:8px;border:1px solid #f0f2f6;cursor:pointer}
+    .place-list li:hover{background:#f7fbff}
+    footer{margin-top:14px;font-size:13px;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Trace to Ghana — distance &amp; flight time</h2>
+    <div class="panel">
+      <section class="card">
+        <label for="addr">Enter your home address</label>
+        <input id="addr" type="text" placeholder="Start typing an address (country accepted)" />
+        <button id="geocodeBtn" class="btn">Locate address</button>
+        <hr />
+        <label for="community">Pick a Ghana community</label>
+        <select id="community">
+          <option value="">-- choose community --</option>
+        </select>
+
+        <label for="routeType">Flight path</label>
+        <select id="routeType">
+          <option value="direct">Direct (great-circle)</option>
+          <option value="commercial">Commercial (via Accra hub)</option>
+        </select>
+
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button id="drawBtn" class="btn">Draw route</button>
+          <button id="resetBtn" class="btn" style="background:#e6e9ee;color:#111">Reset</button>
+        </div>
+
+        <div class="result" id="infoArea" aria-live="polite">
+          <div class="muted">Distance</div>
+          <div id="distance">—</div>
+          <div style="height:6px"></div>
+          <div class="muted">Estimated flight time</div>
+          <div id="duration">—</div>
+        </div>
+
+        <hr />
+        <div class="muted">
+          Options:
+          <ul style="padding-left:18px">
+            <li>Commercial: adds Accra (Kotoka Intl) as a hub stop + 1h layover by default.</li>
+            <li>Estimate speed: default 500 mph (typical short-to-medium commercial jet).</li>
+          </ul>
+        </div>
+        <footer>Mapbox token required (replace in script). Host externally and embed in Wix.</footer>
+      </section>
+
+      <div class="mapwrap">
+        <div id="map"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  window.addEventListener('load', () => {
+    // ========== CONFIG ==========
+    const MAPBOX_TOKEN = 'pk.eyJ1Ijoibnlpa29zIiwiYSI6ImNtaXBvcWdyaDBnNzIzbnBxcWozc3lobjAifQ.aFFIOyY-Rnt_FswHSST30g'; // <-- replace with YOUR own token
+    mapboxgl.accessToken = MAPBOX_TOKEN;
+
+    // Preloaded Ghana communities
+    const communities = [
+      { id: 'abortia',   label: 'Abortia — Volta Region',                      coords: [0.12142, 6.22446] },
+      { id: 'achavanya', label: 'Achavanya — Dangme West (Greater Accra)',     coords: [-0.08995, 5.62555] },
+      { id: 'larteh',    label: 'Larteh — Eastern Region',                     coords: [-0.07935, 5.93568] }
+    ];
+
+    // Accra hub
+    const ACCRA = { label: 'Kotoka International Airport (ACC)', coords: [-0.16679, 5.60519] };
+
+    const FLIGHT_SPEED_MPH = 500;
+    const COMMERCIAL_LAYOVER_HOURS = 1.0;
+
+    // ===== Create map =====
+    const map = new mapboxgl.Map({
+      container: 'map',
+      style: 'mapbox://styles/mapbox/light-v11',
+      center: [0.0, 5.6],
+      zoom: 6
+    });
+
+    map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }));
+
+    // DOM refs
+    const communitySel = document.getElementById('community');
+    const geocodeBtn   = document.getElementById('geocodeBtn');
+    const addrInput    = document.getElementById('addr');
+    const drawBtn      = document.getElementById('drawBtn');
+    const resetBtn     = document.getElementById('resetBtn');
+    const routeTypeSel = document.getElementById('routeType');
+    const distEl       = document.getElementById('distance');
+    const durEl        = document.getElementById('duration');
+
+    // Fill community dropdown
+    communities.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.label;
+      communitySel.add(opt);
+    });
+
+    // Track user coords directly (avoid poking into mapbox private internals)
+    let userCoords = null;
+    let lastRouteId = 'route_line';
+
+    // Small helpers
+    function ensureSource(id, data) {
+      if (map.getSource(id)) {
+        map.getSource(id).setData(data);
+      } else {
+        map.addSource(id, { type: 'geojson', data });
+      }
+    }
+
+    function addPoint(id, coord, props = {}) {
+      const fc = {
+        type: 'FeatureCollection',
+        features: [{
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: coord },
+          properties: props
+        }]
+      };
+      ensureSource(id, fc);
+      if (!map.getLayer(id)) {
+        map.addLayer({
+          id,
+          type: 'circle',
+          source: id,
+          paint: {
+            'circle-radius': 8,
+            'circle-color': '#2b6ef6',
+            'circle-stroke-color': '#fff',
+            'circle-stroke-width': 2
+          }
+        });
+      }
+    }
+
+    function kmToMiles(km) {
+      return km * 0.621371;
+    }
+
+    function formatHours(hours) {
+      const h = Math.floor(hours);
+      const m = Math.round((hours - h) * 60);
+      return `${h} h ${m} min`;
+    }
+
+    function computeRouteDistanceKm(waypoints) {
+      let total = 0;
+      for (let i = 0; i < waypoints.length - 1; i++) {
+        const p1 = turf.point(waypoints[i]);
+        const p2 = turf.point(waypoints[i + 1]);
+        total += turf.distance(p1, p2, { units: 'kilometers' });
+      }
+      return total;
+    }
+
+    async function geocodeAddress(query) {
+      const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json?access_token=${MAPBOX_TOKEN}&limit=5&autocomplete=true`;
+      const r = await fetch(url);
+      if (!r.ok) throw new Error('Geocoding failed');
+      const j = await r.json();
+      return j.features;
+    }
+
+    // Wait for map style to load before adding any layers/sources
+    map.on('load', () => {
+      // add community markers
+      communities.forEach(c => addPoint('pt-' + c.id, c.coords, { label: c.label }));
+    });
+
+    // ===== Button wiring =====
+    geocodeBtn.addEventListener('click', async () => {
+      const q = addrInput.value.trim();
+      if (!q) {
+        alert('Type an address to geocode.');
+        return;
+      }
+      geocodeBtn.disabled = true;
+      geocodeBtn.textContent = 'Searching…';
+
+      try {
+        const results = await geocodeAddress(q);
+        if (!results.length) {
+          alert('No matches found. Try again.');
+          return;
+        }
+        const best = results[0];
+        userCoords = best.center; // [lon, lat]
+
+        addPoint('user_marker', userCoords, { label: best.place_name });
+        map.flyTo({ center: userCoords, zoom: 10 });
+        addrInput.value = best.place_name;
+      } catch (e) {
+        console.error(e);
+        alert('Geocode error: ' + e.message);
+      } finally {
+        geocodeBtn.disabled = false;
+        geocodeBtn.textContent = 'Locate address';
+      }
+    });
+
+    drawBtn.addEventListener('click', () => {
+      if (!userCoords) {
+        alert('Please geocode your address first.');
+        return;
+      }
+
+      const selId = communitySel.value;
+      if (!selId) {
+        alert('Please pick a community.');
+        return;
+      }
+      const community = communities.find(c => c.id === selId);
+      if (!community) {
+        alert('Community missing');
+        return;
+      }
+
+      const routeType = routeTypeSel.value;
+      let waypoints;
+      if (routeType === 'direct') {
+        waypoints = [userCoords, community.coords];
+      } else {
+        waypoints = [userCoords, ACCRA.coords, community.coords];
+      }
+
+      // Remove old route if any
+      if (map.getLayer(lastRouteId)) map.removeLayer(lastRouteId);
+      if (map.getSource(lastRouteId)) map.removeSource(lastRouteId);
+
+      const lineGeo = turf.lineString(waypoints);
+      map.addSource(lastRouteId, { type: 'geojson', data: lineGeo });
+      map.addLayer({
+        id: lastRouteId,
+        type: 'line',
+        source: lastRouteId,
+        paint: {
+          'line-color': '#ff4500',
+          'line-width': 4,
+          'line-opacity': 0.9
+        }
+      });
+
+      // Add / update markers
+      addPoint('pt-user', userCoords, { label: 'Your address' });
+      addPoint('pt-dest', community.coords, { label: community.label });
+      if (routeType === 'commercial') {
+        addPoint('pt-acc', ACCRA.coords, { label: ACCRA.label });
+      } else {
+        // remove ACC marker if present
+        if (map.getLayer('pt-acc')) map.removeLayer('pt-acc');
+        if (map.getSource('pt-acc')) map.removeSource('pt-acc');
+      }
+
+      // Distance & time
+      const km = computeRouteDistanceKm(waypoints);
+      const miles = kmToMiles(km);
+      let hours = miles / FLIGHT_SPEED_MPH;
+      if (routeType === 'commercial') hours += COMMERCIAL_LAYOVER_HOURS;
+
+      distEl.textContent = `${km.toFixed(1)} km • ${miles.toFixed(1)} miles`;
+      durEl.textContent =
+        `${formatHours(hours)} (est.) — assumes ${FLIGHT_SPEED_MPH} mph cruise` +
+        (routeType === 'commercial' ? ` + ${COMMERCIAL_LAYOVER_HOURS} h layover` : ' with no layover');
+
+      // Fit bounds to whole route
+      const bounds = waypoints.reduce(
+        (b, c) => b.extend(c),
+        new mapboxgl.LngLatBounds(waypoints[0], waypoints[0])
+      );
+      map.fitBounds(bounds, { padding: 40 });
+    });
+
+    resetBtn.addEventListener('click', () => {
+      ['pt-user', 'pt-dest', 'pt-acc', 'user_marker', lastRouteId].forEach(id => {
+        if (map.getLayer(id)) map.removeLayer(id);
+        if (map.getSource(id)) map.removeSource(id);
+      });
+      distEl.textContent = '—';
+      durEl.textContent = '—';
+      addrInput.value = '';
+      userCoords = null;
+      communitySel.value = '';
+      routeTypeSel.value = 'direct';
+      map.flyTo({ center: [0.0, 5.6], zoom: 6 });
+    });
+
+    // Click community markers to select
+    map.on('click', e => {
+      const layers = communities.map(c => 'pt-' + c.id);
+      const features = map.queryRenderedFeatures(e.point, { layers });
+      if (features && features.length) {
+        const id = features[0].layer.id.replace('pt-', '');
+        communitySel.value = id;
+        map.flyTo({ center: features[0].geometry.coordinates, zoom: 10 });
+      }
+    });
+  });
+  </script>
+</body>
+</html>
